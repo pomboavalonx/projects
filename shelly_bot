@@ -1,0 +1,5 @@
+#!/bin/bash
+# Wrapper para executar SHELLy-Bot
+cd "$(dirname "$0")"
+export PYTHONPATH="$(dirname "$0"):$PYTHONPATH"
+exec python -m shelly_bot "$@"

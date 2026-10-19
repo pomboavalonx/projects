@@ -1,0 +1,18 @@
+{
+  "nome": "Allen",
+  "especie": "Xenomorfo Wireframe",
+  "nascimento": 1792132810.301254,
+  "idade_segundos": 155.95600000000107,
+  "estagio": "adolescente",
+  "fome": 47.797799999991256,
+  "energia": 35.32132000001101,
+  "felicidade": 99.3560799999987,
+  "saude": 100,
+  "higiene": 66.88087999999483,
+  "refeicoes": 2,
+  "brincadeiras": 4,
+  "sonecas": 0,
+  "vivo": true,
+  "dormindo": false,
+  "doente": false
+}
