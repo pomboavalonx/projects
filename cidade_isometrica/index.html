@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cidade Isometrica - Mundo Aberto</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#0b0e1a; }
+  canvas { display:block; }
+  #hud {
+    position:fixed; top:12px; left:12px; color:#9fd8ff;
+    font-family:monospace; font-size:13px; line-height:1.5;
+    background:rgba(10,14,30,.65); padding:10px 14px; border-radius:8px;
+    border:1px solid rgba(120,180,255,.25); pointer-events:none;
+  }
+  #hud b { color:#fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <b>CIDADE ISOMETRICA</b><br>
+  setas: mover | espaco: atirar<br><span id="score">ALIENS: 0</span>
+</div>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0;
+function resize(){ W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener("resize", resize); resize();
+
+const HW = 32, HH = 16;
+function iso(x, y, z){
+  return [ (x - y) * HW, (x + y) * HH - (z || 0) ];
+}
+
+const GRID = 42;
+const ROAD_PERIOD = 7, ROAD_W = 2;
+const isRoad = i => (i % ROAD_PERIOD) < ROAD_W;
+
+let seed = 1337;
+function rnd(){ seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+  let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296; }
+
+const buildings = [];
+const blocks = [];
+for (let by = 0; by < GRID; by += ROAD_PERIOD) {
+  for (let bx = 0; bx < GRID; bx += ROAD_PERIOD) {
+    const ox = bx + ROAD_W, oy = by + ROAD_W;
+    const size = ROAD_PERIOD - ROAD_W;
+    blocks.push({ x: ox, y: oy, size });
+    const r = rnd();
+    if (r < 0.42) {
+      const h = 60 + Math.floor(rnd() * 160);
+      const kind = rnd() < 0.5 ? "office" : "tower";
+      buildings.push({ x: ox + 0.7, y: oy + 0.7, w: size - 1.4, d: size - 1.4, h, kind,
+        hue: 200 + Math.floor(rnd() * 60) });
+    } else if (r < 0.78) {
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+        if (rnd() < 0.85) {
+          buildings.push({ x: ox + 0.6 + i * 2.4, y: oy + 0.6 + j * 2.4, w: 1.7, d: 1.7,
+            h: 14 + rnd() * 8, kind: "house", hue: 10 + Math.floor(rnd() * 40) });
+        }
+      }
+    }
+  }
+}
+
+const cars = [];
+const CAR_COLORS = ["#e74c3c","#3498db","#f1c40f","#ecf0f1","#9b59b6","#2ecc71","#e67e22"];
+for (let i = 0; i < GRID; i += ROAD_PERIOD) {
+  for (let lane = 0; lane < ROAD_W; lane++) {
+    const line = i + lane;
+    const dir = lane === 0 ? 1 : -1;
+    const n = 2 + Math.floor(rnd() * 2);
+    for (let k = 0; k < n; k++) {
+      cars.push({ axis: "x", line, dir, pos: rnd() * GRID,
+        speed: 2.2 + rnd() * 1.6, color: CAR_COLORS[Math.floor(rnd() * CAR_COLORS.length)] });
+    }
+    for (let k = 0; k < n; k++) {
+      cars.push({ axis: "y", line, dir, pos: rnd() * GRID,
+        speed: 2.2 + rnd() * 1.6, color: CAR_COLORS[Math.floor(rnd() * CAR_COLORS.length)] });
+    }
+  }
+}
+
+const peds = [];
+const PED_COLORS = ["#ff6b6b","#4ecdc4","#ffe66d","#a29bfe","#fd79a8","#74b9ff","#55efc4"];
+for (const b of blocks) {
+  const n = 1 + Math.floor(rnd() * 3);
+  for (let k = 0; k < n; k++) {
+    const off = 0.35;
+    const s = b.size - off * 2;
+    const per = 4 * s;
+    peds.push({ bx: b.x + off, by: b.y + off, s, t: rnd() * per,
+      speed: (0.8 + rnd() * 0.8) * (rnd() < 0.5 ? 1 : -1),
+      color: PED_COLORS[Math.floor(rnd() * PED_COLORS.length)] });
+  }
+}
+function pedPos(p){
+  const per = 4 * p.s;
+  let t = ((p.t % per) + per) % per;
+  const s = p.s;
+  if (t < s)       return [ p.bx + t, p.by ];
+  if (t < 2 * s)   return [ p.bx + s, p.by + (t - s) ];
+  if (t < 3 * s)   return [ p.bx + s - (t - 2 * s), p.by + s ];
+  return [ p.bx, p.by + s - (t - 3 * s) ];
+}
+
+const player = { x: GRID / 2 + 0.5, y: GRID / 2 + 0.5, speed: 4.5, walk: 0, fx: 1, fy: 0 };
+const keys = {};
+let bullets = [], score = 0, shootCd = 0, muzzle = 0, hits = [];
+const aliens = [];
+function respawnAlien(a) {
+  for (let tries = 0; tries < 60; tries++) {
+    const x = 1 + Math.random() * (GRID - 2), y = 1 + Math.random() * (GRID - 2);
+    if (blocked(x, y)) continue;
+    if (Math.hypot(x - player.x, y - player.y) < 12) continue;
+    a.x = x; a.y = y; a.dead = false; a.wt = 0; return;
+  }
+  a.dead = false;
+}
+function spawnAlien() {
+  const a = { x: 0, y: 0, dead: false, wt: 0, wx: 1, wy: 0, anim: Math.random() * 10, flee: false };
+  respawnAlien(a);
+  aliens.push(a);
+}
+for (let i = 0; i < 12; i++) spawnAlien();
+addEventListener("keydown", e => {
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+});
+addEventListener("keyup", e => keys[e.key] = false);
+// anti "tecla presa": se a janela perder o foco, solta todas as teclas
+addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+addEventListener("focus", () => { for (const k in keys) keys[k] = false; });
+
+function blocked(x, y){
+  if (x < 0.3 || y < 0.3 || x > GRID - 0.3 || y > GRID - 0.3) return true;
+  for (const b of buildings) {
+    if (x > b.x - 0.25 && x < b.x + b.w + 0.25 && y > b.y - 0.25 && y < b.y + b.d + 0.25) return true;
+  }
+  return false;
+}
+
+function box(x, y, w, d, h, top, left, right){
+  const [cx, cy] = iso(x + w / 2, y + d / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(cx - (w + d) * HW / 2, cy);
+  ctx.lineTo(cx, cy + (w + d) * HH / 2);
+  ctx.lineTo(cx, cy + (w + d) * HH / 2 + h);
+  ctx.lineTo(cx - (w + d) * HW / 2, cy + h);
+  ctx.closePath(); ctx.fillStyle = left; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx + (w + d) * HW / 2, cy);
+  ctx.lineTo(cx, cy + (w + d) * HH / 2);
+  ctx.lineTo(cx, cy + (w + d) * HH / 2 + h);
+  ctx.lineTo(cx + (w + d) * HW / 2, cy + h);
+  ctx.closePath(); ctx.fillStyle = right; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - (w + d) * HH / 2);
+  ctx.lineTo(cx + (w + d) * HW / 2, cy);
+  ctx.lineTo(cx, cy + (w + d) * HH / 2);
+  ctx.lineTo(cx - (w + d) * HW / 2, cy);
+  ctx.closePath(); ctx.fillStyle = top; ctx.fill();
+}
+function windows(b){
+  const floors = Math.floor(b.h / 18);
+  const cols = Math.max(2, Math.floor(b.w * 2));
+  for (let f = 1; f < floors; f++) {
+    const z = f * 18;
+    for (let c = 0; c < cols; c++) {
+      const t = (c + 0.5) / cols;
+      const lit = ((f * 7 + c * 13 + Math.floor(b.x * 5)) % 5) < 2;
+      const col = lit ? "rgba(255,230,140,.9)" : "rgba(20,30,50,.55)";
+      const [ex, ey] = iso(b.x + b.w * t, b.y + b.d / 2, z);
+      ctx.fillStyle = col; ctx.fillRect(ex - 2, ey - 3, 4, 6);
+      const [rx, ry] = iso(b.x + b.w / 2, b.y + b.d * t, z);
+      ctx.fillStyle = col; ctx.fillRect(rx - 2, ry - 3, 4, 6);
+    }
+  }
+}
+function drawCar(c){
+  let x, y;
+  if (c.axis === "x") { x = c.pos; y = c.line + 0.5; }
+  else                { x = c.line + 0.5; y = c.pos; }
+  const w = c.axis === "x" ? 0.7 : 0.45, d = c.axis === "x" ? 0.45 : 0.7;
+  box(x - w / 2, y - d / 2, w, d, 7, c.color, shade(c.color, -25), shade(c.color, -45));
+  box(x - w / 2 + w * 0.2, y - d / 2 + d * 0.2, w * 0.6, d * 0.6, 12,
+      shade(c.color, 15), shade(c.color, -10), shade(c.color, -30));
+}
+function shade(hex, amt){
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) + amt, g = ((n >> 8) & 255) + amt, b = (n & 255) + amt;
+  r = Math.max(0, Math.min(255, r)); g = Math.max(0, Math.min(255, g)); b = Math.max(0, Math.min(255, b));
+  return "rgb(" + r + "," + g + "," + b + ")";
+}
+function drawPed(p){
+  const [x, y] = pedPos(p);
+  const bob = Math.sin(p.t * 6) * 1.5;
+  box(x - 0.12, y - 0.12, 0.24, 0.24, 10 + bob, p.color, shade(p.color, -30), shade(p.color, -50));
+  const [hx, hy] = iso(x, y, 13 + bob);
+  ctx.beginPath(); ctx.arc(hx, hy - 3, 3.2, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffd9b3"; ctx.fill();
+}
+function drawPlayer(){
+  const bob = Math.sin(player.walk) * 1.5;
+  box(player.x - 0.2, player.y - 0.2, 0.4, 0.4, 14 + bob, "#00e5ff", "#0097a7", "#006064");
+  const [hx, hy] = iso(player.x, player.y, 17 + bob);
+  ctx.beginPath(); ctx.arc(hx, hy - 4, 4, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffe0b2"; ctx.fill();
+  const [sx, sy] = iso(player.x, player.y, 0);
+  ctx.beginPath(); ctx.ellipse(sx, sy, 10, 5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.fill();
+}
+
+function drawAlien(a) {
+  if (a.dead) return;
+  const bob = Math.sin(a.anim) * 2;
+  const col = a.flee ? "#ff5555" : "#55ff88";
+  box(a.x - 0.18, a.y - 0.18, 0.36, 0.36, 12 + bob, col, shade(col, -40), shade(col, -70));
+  const [hx, hy] = iso(a.x, a.y, 15 + bob);
+  ctx.beginPath(); ctx.arc(hx, hy - 4, 4.5, 0, Math.PI * 2);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.fillStyle = "#111";
+  ctx.beginPath(); ctx.arc(hx - 2, hy - 5, 1.3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hx + 2, hy - 5, 1.3, 0, Math.PI * 2); ctx.fill();
+}
+function drawBullet(b) {
+  const [bx, by] = iso(b.x, b.y, 8);
+  // rastro
+  const [tx, ty] = iso(b.x - b.vx * 0.04, b.y - b.vy * 0.04, 8);
+  ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by);
+  ctx.strokeStyle = "rgba(255,238,85,.4)"; ctx.lineWidth = 4; ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,238,85,.25)"; ctx.fill();
+  ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffee55"; ctx.fill();
+}
+function drawMuzzle() {
+  if (muzzle <= 0) return;
+  const [mx, my] = iso(player.x + player.fx * 0.6, player.y + player.fy * 0.6, 10);
+  ctx.beginPath(); ctx.arc(mx, my, 10, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,200,50,.6)"; ctx.fill();
+}
+function drawHit(h) {
+  const [hx, hy] = iso(h.x, h.y, 8);
+  const r = (0.3 - h.t) * 60 + 5;
+  ctx.beginPath(); ctx.arc(hx, hy, r, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(85,255,136," + (h.t / 0.3 * 0.7) + ")"; ctx.fill();
+}
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  let dx = 0, dy = 0;
+  if (keys["ArrowUp"])    { dx -= 1; dy -= 1; }
+  if (keys["ArrowDown"])  { dx += 1; dy += 1; }
+  if (keys["ArrowLeft"])  { dx -= 1; dy += 1; }
+  if (keys["ArrowRight"]) { dx += 1; dy -= 1; }
+  if (dx || dy) {
+    const l = Math.hypot(dx, dy);
+    player.fx = dx / l; player.fy = dy / l;
+    const nx = player.x + dx / l * player.speed * dt;
+    const ny = player.y + dy / l * player.speed * dt;
+    if (!blocked(nx, player.y)) player.x = nx;
+    if (!blocked(player.x, ny)) player.y = ny;
+    player.walk += dt * 12;
+  }
+  for (const c of cars) {
+    c.pos += c.dir * c.speed * dt;
+    if (c.pos > GRID + 1) c.pos = -1;
+    if (c.pos < -1) c.pos = GRID + 1;
+  }
+  for (const p of peds) p.t += p.speed * dt;
+
+  // ---- tiro: mira no alien mais proximo ----
+  shootCd -= dt; muzzle -= dt;
+  if (keys[" "] && shootCd <= 0) {
+    shootCd = 0.22; muzzle = 0.08;
+    let tx = player.fx, ty = player.fy;
+    let best = 1e9;
+    for (const a of aliens) {
+      if (a.dead) continue;
+      const d = Math.hypot(a.x - player.x, a.y - player.y);
+      if (d < best) { best = d; tx = (a.x - player.x) / d; ty = (a.y - player.y) / d; }
+    }
+    bullets.push({ x: player.x + tx * 0.5, y: player.y + ty * 0.5,
+      vx: tx * 12, vy: ty * 12, life: 2.0 });
+  }
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    let dead = b.life <= 0 || b.x < 0 || b.y < 0 || b.x > GRID || b.y > GRID;
+    if (!dead) for (const bd of buildings) {
+      if (b.x > bd.x && b.x < bd.x + bd.w && b.y > bd.y && b.y < bd.y + bd.d) { dead = true; break; }
+    }
+    if (!dead) for (const a of aliens) {
+      if (!a.dead && Math.hypot(a.x - b.x, a.y - b.y) < 0.9) {
+        a.dead = true; score++;
+        document.getElementById("score").textContent = "ALIENS: " + score;
+        hits.push({ x: a.x, y: a.y, t: 0.3 });
+        respawnAlien(a);
+        dead = true; break;
+      }
+    }
+    if (dead) bullets.splice(i, 1);
+  }
+  for (let i = hits.length - 1; i >= 0; i--) { hits[i].t -= dt; if (hits[i].t <= 0) hits.splice(i, 1); }
+  // ---- aliens: fogem do jogador ----
+  for (const a of aliens) {
+    if (a.dead) continue;
+    const ddx = a.x - player.x, ddy = a.y - player.y;
+    const dist = Math.hypot(ddx, ddy);
+    let vx, vy;
+    if (dist < 7) { vx = ddx / dist; vy = ddy / dist; a.flee = true; }
+    else {
+      a.wt -= dt;
+      if (a.wt <= 0) { a.wt = 1 + Math.random() * 2; const ang = Math.random() * Math.PI * 2; a.wx = Math.cos(ang); a.wy = Math.sin(ang); }
+      vx = a.wx; vy = a.wy; a.flee = false;
+    }
+    const sp = a.flee ? 3.4 : 1.2;
+    const nx = a.x + vx * sp * dt, ny = a.y + vy * sp * dt;
+    if (!blocked(nx, a.y)) a.x = nx; else a.wx = -a.wx;
+    if (!blocked(a.x, ny)) a.y = ny; else a.wy = -a.wy;
+    a.anim += dt * 10;
+  }
+
+  const [pcx, pcy] = iso(player.x, player.y, 0);
+  const camX = W / 2 - pcx, camY = H / 2 - pcy - 40;
+
+  ctx.fillStyle = "#0b0e1a"; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.translate(camX, camY);
+
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const road = isRoad(x) || isRoad(y);
+      const [cx, cy] = iso(x + 0.5, y + 0.5, 0);
+      if (cx < -HW * 2 || cx > W + HW * 2 || cy < -HH * 2 || cy > H + HH * 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - HH); ctx.lineTo(cx + HW, cy);
+      ctx.lineTo(cx, cy + HH); ctx.lineTo(cx - HW, cy);
+      ctx.closePath();
+      if (road) {
+        ctx.fillStyle = (x + y) % 2 ? "#2a2d3a" : "#282b37";
+      } else {
+        const inBlock = !isRoad(x) && !isRoad(y);
+        const edge = (x % ROAD_PERIOD === ROAD_W) || (y % ROAD_PERIOD === ROAD_W) ||
+                     (x % ROAD_PERIOD === ROAD_PERIOD - 1) || (y % ROAD_PERIOD === ROAD_PERIOD - 1);
+        ctx.fillStyle = inBlock && edge ? "#4a4f5e" : ((x + y) % 2 ? "#232a22" : "#212820");
+      }
+      ctx.fill();
+    }
+  }
+
+  ctx.strokeStyle = "rgba(240,200,60,.5)"; ctx.lineWidth = 1.5;
+  for (let i = 0; i < GRID; i += ROAD_PERIOD) {
+    const [ax, ay] = iso(0, i + 1, 0), [bx, by] = iso(GRID, i + 1, 0);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    const [cx2, cy2] = iso(i + 1, 0, 0), [dx2, dy2] = iso(i + 1, GRID, 0);
+    ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(dx2, dy2); ctx.stroke();
+  }
+
+  ctx.strokeStyle = "rgba(90,200,255,.10)"; ctx.lineWidth = 1;
+  for (let i = 0; i <= GRID; i++) {
+    const [a1, a2] = iso(i, 0, 0), [b1, b2] = iso(i, GRID, 0);
+    ctx.beginPath(); ctx.moveTo(a1, a2); ctx.lineTo(b1, b2); ctx.stroke();
+    const [c1, c2] = iso(0, i, 0), [d1, d2] = iso(GRID, i, 0);
+    ctx.beginPath(); ctx.moveTo(c1, c2); ctx.lineTo(d1, d2); ctx.stroke();
+  }
+
+  const ents = [];
+  for (const b of buildings) ents.push({ depth: b.x + b.w / 2 + b.y + b.d / 2, draw: () => {
+    const top = b.kind === "house" ? "hsl(" + b.hue + ",45%,55%)" : "hsl(" + b.hue + ",18%,42%)";
+    const l = b.kind === "house" ? "hsl(" + b.hue + ",35%,40%)" : "hsl(" + b.hue + ",15%,30%)";
+    const r = b.kind === "house" ? "hsl(" + b.hue + ",35%,30%)" : "hsl(" + b.hue + ",15%,22%)";
+    box(b.x, b.y, b.w, b.d, b.h, top, l, r);
+    if (b.kind !== "house") windows(b);
+    if (b.kind === "house") {
+      const [px, py] = iso(b.x + b.w / 2, b.y + b.d, 0);
+      ctx.fillStyle = "#3e2723"; ctx.fillRect(px - 3, py - 9, 6, 9);
+    }
+  }});
+  for (const c of cars) {
+    const x = c.axis === "x" ? c.pos : c.line + 0.5;
+    const y = c.axis === "x" ? c.line + 0.5 : c.pos;
+    ents.push({ depth: x + y, draw: () => drawCar(c) });
+  }
+  for (const p of peds) {
+    const [x, y] = pedPos(p);
+    ents.push({ depth: x + y, draw: () => drawPed(p) });
+  }
+  for (const a of aliens) ents.push({ depth: a.x + a.y, draw: () => drawAlien(a) });
+  for (const b of bullets) ents.push({ depth: b.x + b.y, draw: () => drawBullet(b) });
+  for (const h of hits) ents.push({ depth: h.x + h.y, draw: () => drawHit(h) });
+  ents.push({ depth: player.x + player.y, draw: drawPlayer });
+  ents.push({ depth: 9999, draw: drawMuzzle });
+  ents.sort((a, b) => a.depth - b.depth);
+  for (const e of ents) e.draw();
+
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
